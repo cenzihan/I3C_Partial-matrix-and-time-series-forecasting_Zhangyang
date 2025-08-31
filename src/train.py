@@ -26,7 +26,7 @@ def main():
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-
+    
     # Clear previous results and create output directories
     result_dir = config['output']['training_vis_dir']
     print(f"Clearing previous results in '{result_dir}'...")
@@ -108,8 +108,16 @@ def main():
             # Forward pass
             y_pred = model(partial_csi, prev_csi)
             
-            # Compute loss
-            loss = criterion(y_pred, y_true)
+            # Create a mask for the missing parts, ensuring it has a REAL dtype
+            present_indices = config['data']['input_tx_indices']
+            # Initialize mask with 1s (all missing)
+            mask = torch.ones_like(y_true.real, device=device) # Use .real to ensure dtype is float
+            # Set mask to 0 for the parts that were present in the input
+            # Note: The shape of y_true is [batch, devices, tx_ant, rx_ant, subcarriers]
+            # We are masking along the tx_ant dimension (dim=2)
+            mask[:, :, present_indices, :, :] = 0.0
+
+            loss = criterion(y_pred, y_true, mask, config['training']['missing_part_loss_weight'])
             
             # Backward pass and optimize
             loss.backward()
@@ -119,7 +127,9 @@ def main():
             train_pbar.set_postfix(loss=loss.item())
 
         avg_train_loss = train_loss / len(train_loader)
-        writer.add_scalar('Loss/train', avg_train_loss, epoch)
+        # --- TensorBoard Logging ---
+        if writer:
+            writer.add_scalar('Loss/train', avg_train_loss, epoch)
 
         # --- Validation Phase ---
         model.eval()
@@ -136,9 +146,13 @@ def main():
                 # Forward pass
                 y_pred = model(partial_csi, prev_csi)
                 
-                # Compute loss
-                loss = criterion(y_pred, y_true)
-                val_loss += loss.item()
+                # Create the mask for validation loss calculation as well, ensuring REAL dtype
+                present_indices = config['data']['input_tx_indices']
+                val_mask = torch.ones_like(y_true.real, device=device) # Use .real to ensure dtype is float
+                val_mask[:, :, present_indices, :, :] = 0.0
+                
+                v_loss = criterion(y_pred, y_true, val_mask, config['training']['missing_part_loss_weight'])
+                val_loss += v_loss.item()
                 
                 # --- Per-TX-Antenna Loss Calculation for Dynamic Selection ---
                 # Note: Currently disabled as we're using TX antenna selection mode
@@ -156,17 +170,25 @@ def main():
                     val_sample_y_pred = y_pred.cpu()
 
         avg_val_loss = val_loss / len(val_loader)
-        writer.add_scalar('Loss/validation', avg_val_loss, epoch)
+        if writer:
+            writer.add_scalar('Loss/validation', avg_val_loss, epoch)
         
-        # --- Get Alpha from WeightedSum layer for logging ---
-        # The parameter is stored as a tensor, get its value.
-        # We access it through model.module if using DataParallel
-        model_to_log = model.module if isinstance(model, torch.nn.DataParallel) else model
-        alpha_param = model_to_log.weighted_sum.alpha.item()
-        constrained_alpha = torch.sigmoid(torch.tensor(alpha_param)).item()
-        writer.add_scalar('Alpha/constrained', constrained_alpha, epoch)
+        # --- Logging, Saving, Early Stopping, and Visualization ---
+        # (This entire block is inside the 'for epoch in ...' loop)
         
-        print(f"Epoch {epoch}: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}, Alpha = {constrained_alpha:.4f}")
+        # --- Alpha Logging ---
+        model_to_print = model.module if isinstance(model, torch.nn.DataParallel) else model
+        if model_to_print.weighted_sum.alpha_logit.requires_grad:
+            alpha_value = torch.sigmoid(model_to_print.weighted_sum.alpha_logit).item()
+            print(f"--> WeightedSum alpha (trainable) = {alpha_value:.4f}")
+        else:
+            alpha_value = torch.sigmoid(model_to_print.weighted_sum.alpha_logit).item()
+            print(f"--> WeightedSum alpha (fixed) = {alpha_value:.4f}")
+
+        if writer:
+            writer.add_scalar('Alpha/value', alpha_value, epoch)
+
+        print(f"Epoch {epoch} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
 
         # --- Save Best Model & Early Stopping Logic ---
         if avg_val_loss < best_val_loss:
@@ -174,27 +196,29 @@ def main():
             best_model_path = os.path.join(config['output']['model_dir'], "best_model.pth")
             torch.save(model.state_dict(), best_model_path)
             print(f"New best model saved to {best_model_path} with validation loss: {best_val_loss:.6f}")
-            early_stopping_counter = 0 # Reset counter on improvement
+            early_stopping_counter = 0  # Reset counter on improvement
         elif use_early_stopping:
             early_stopping_counter += 1
             print(f"Validation loss did not improve. Early stopping counter: {early_stopping_counter}/{patience}")
             if early_stopping_counter >= patience:
                 print("\nEarly stopping triggered. Terminating training.")
-                break # Exit the training loop
+                break  # This is now correctly inside the loop
 
         # --- Visualization ---
         if epoch % config['output']['save_freq'] == 0:
             visualize_and_save(
-                val_sample_inputs, 
-                val_sample_y_true, 
-                val_sample_y_pred, 
+                val_sample_inputs,
+                val_sample_y_true,
+                val_sample_y_pred,
                 epoch,
                 avg_val_loss,
                 config
             )
+    # End of the for loop for epochs
 
     print("\n--- Training Finished ---")
-    writer.close()
+    if writer:
+        writer.close()
     
     # Save the final model
     final_model_path = os.path.join(config['output']['model_dir'], "final_model.pth")

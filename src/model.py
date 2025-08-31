@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchsummary import summary
+import numpy as np
 
 def _cnn_block(in_channels, out_channels, kernel_size):
     """A standard CNN block with Conv2D, ReLU activation, and Batch Norm."""
@@ -19,20 +20,36 @@ class _LstmBranch(nn.Module):
     It first uses a CNN to extract features from each time step,
     then uses an LSTM to learn temporal dependencies.
     """
-    def __init__(self, in_channels, height, width, out_features=64):
+    def __init__(self, in_channels, height, width, out_features, lstm_config):
         super(_LstmBranch, self).__init__()
         
         # 1. Per-timestep CNN feature extractor
         self.cnn_extractor = nn.Sequential(
             _cnn_block(in_channels, 32, kernel_size=(3, 3)),
-            nn.AdaptiveAvgPool2d((1, 1)) # Reduce each feature map to a single value
+            # OLD BOTTLENECK: nn.AdaptiveAvgPool2d((1, 1))
         )
         
+        # Calculate the flattened size after the CNN extractor
+        # We need a dummy tensor to calculate the output shape of the CNN
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, in_channels, height, width)
+            cnn_out_shape = self.cnn_extractor(dummy_input).shape
+            self.flattened_size = cnn_out_shape[1] * cnn_out_shape[2] * cnn_out_shape[3]
+            
+        self.feature_projection = nn.Linear(self.flattened_size, lstm_config['projection_size'])
+
         # 2. LSTM for temporal modeling
-        self.lstm = nn.LSTM(input_size=32, hidden_size=128, num_layers=2, batch_first=True)
+        self.lstm = nn.LSTM(
+            input_size=lstm_config['projection_size'], 
+            hidden_size=lstm_config['hidden_size'], 
+            num_layers=lstm_config['num_layers'], 
+            batch_first=True,
+            # Dropout is only applied if num_layers > 1
+            dropout=lstm_config.get('dropout', 0.0) if lstm_config['num_layers'] > 1 else 0.0
+        )
         
         # 3. Output layer
-        self.fc = nn.Linear(128, out_features)
+        self.fc = nn.Linear(lstm_config['hidden_size'], out_features)
         
         # Store dimensions for reshaping
         self.out_features = out_features
@@ -47,14 +64,20 @@ class _LstmBranch(nn.Module):
         # We need to process each time step independently.
         # Reshape to treat SeqLen as part of the batch dimension for the CNN.
         x_reshaped = x.view(N * SeqLen, C, H, W)
-        cnn_features = self.cnn_extractor(x_reshaped) # -> [N*SeqLen, 32, 1, 1]
-        cnn_features = cnn_features.view(N, SeqLen, -1) # -> [N, SeqLen, 32]
+        cnn_features = self.cnn_extractor(x_reshaped) # -> [N*SeqLen, C_out, H_out, W_out]
+        
+        # Flatten and project features before feeding to LSTM
+        cnn_features_flattened = cnn_features.view(N * SeqLen, -1) # -> [N*SeqLen, flattened_size]
+        projected_features = self.feature_projection(cnn_features_flattened) # -> [N*SeqLen, projection_size]
+        
+        # Reshape back to sequence format for LSTM
+        lstm_input = projected_features.view(N, SeqLen, -1) # -> [N, SeqLen, projection_size]
 
         # --- LSTM Temporal Modeling ---
         # LSTM processes the sequence of features.
         # We take the output of the last time step.
-        lstm_out, _ = self.lstm(cnn_features) # -> [N, SeqLen, 128]
-        last_time_step_out = lstm_out[:, -1, :] # -> [N, 128]
+        lstm_out, _ = self.lstm(lstm_input) # -> [N, SeqLen, hidden_size]
+        last_time_step_out = lstm_out[:, -1, :] # -> [N, hidden_size]
         
         # --- Output Generation ---
         # Pass the final LSTM output through a linear layer.
@@ -70,16 +93,21 @@ class _LstmBranch(nn.Module):
 
 class WeightedSum(nn.Module):
     """
-    A custom layer to compute a trainable weighted sum of two tensors.
-    alpha * tensor1 + (1 - alpha) * tensor2
+    A layer that computes a learnable weighted sum of two input tensors.
+    The weight 'alpha' is a learnable parameter.
     """
-    def __init__(self):
+    def __init__(self, initial_value=0.5, is_trainable=True):
         super(WeightedSum, self).__init__()
-        self.alpha = nn.Parameter(torch.zeros(1))
+        # Initialize alpha as a learnable parameter with a sigmoid function
+        # to ensure it stays between 0 and 1. We initialize the raw logit.
+        # logit(p) = log(p / (1 - p))
+        initial_logit = torch.tensor(np.log(initial_value / (1 - initial_value)), dtype=torch.float32)
+        self.alpha_logit = nn.Parameter(initial_logit, requires_grad=is_trainable)
 
-    def forward(self, tensor1, tensor2):
-        constrained_alpha = torch.sigmoid(self.alpha)
-        return constrained_alpha * tensor1 + (1.0 - constrained_alpha) * tensor2
+    def forward(self, x1, x2):
+        # Apply sigmoid to get alpha in the range [0, 1]
+        alpha = torch.sigmoid(self.alpha_logit)
+        return alpha * x1 + (1 - alpha) * x2
 
 class CsiInpaintingNet(nn.Module):
     """
@@ -88,6 +116,8 @@ class CsiInpaintingNet(nn.Module):
     """
     def __init__(self, config):
         super(CsiInpaintingNet, self).__init__()
+        self.config = config
+        self.sequence_length = config['training']['sequence_length']
         
         self.csi_shape = config['model']['csi_shape']
         num_rx, num_tx, num_meas, num_subc = self.csi_shape
@@ -109,13 +139,22 @@ class CsiInpaintingNet(nn.Module):
             _cnn_block(64, 64, kernel_size=(3, 3))
         )
         
-        # --- Branch 2 & 3: Temporal and Fusion Branches (Configurable) ---
-        self.weighted_sum = WeightedSum()
-        
+        # --- Branch 2: Temporal Branch (Configurable) ---
+        branch_type = self.config['model']['branch_type']
         if branch_type == 'lstm':
             print("Using LSTM branch for temporal layer.")
             H = num_tx * num_meas # Height for the reshaped tensor
-            self.temporal_branch = _LstmBranch(in_channels=num_rx * 2, height=H, width=num_subc, out_features=64)
+            # Ensure the 'lstm' config exists
+            if 'lstm' not in self.config['model']:
+                raise ValueError("LSTM configuration is missing in the model config.")
+            lstm_config = self.config['model']['lstm']
+            self.temporal_branch = _LstmBranch(
+                in_channels=num_rx * 2, 
+                height=H, 
+                width=num_subc, 
+                out_features=64,
+                lstm_config=lstm_config
+            )
         else: # Default to CNN
             print("Using CNN branch for temporal layer.")
             self.temporal_branch = nn.Sequential(
@@ -123,7 +162,14 @@ class CsiInpaintingNet(nn.Module):
                 _cnn_block(64, 64, kernel_size=(3, 3))
             )
 
-        # Fusion branch is always CNN-based to process the fused features
+        # -- Weighted Sum Fusion --
+        ws_config = self.config['model']['weighted_sum']
+        self.weighted_sum = WeightedSum(
+            initial_value=ws_config['alpha_initial_value'],
+            is_trainable=ws_config['alpha_is_trainable']
+        )
+        
+        # --- Fusion Branch ---
         self.fusion_branch = nn.Sequential(
             _cnn_block(64, 64, kernel_size=(3, 3)),
             _cnn_block(64, 64, kernel_size=(3, 3))

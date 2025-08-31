@@ -10,3 +10,6 @@ logs/
 *.tmp
 *.temp
 *.log
+
+
+*.pyc       

@@ -14,7 +14,17 @@ data:
 # -- Model Architecture --
 model:
   name: "CsiInpaintingNet"
-  branch_type: "lstm" # Can be "cnn" or "lstm"
+  branch_type: "lstm" # "cnn" or "lstm"
+  # NEW: LSTM specific configuration
+  lstm:
+    hidden_size: 256
+    num_layers: 3
+    dropout: 0.2 # Dropout is only applied if num_layers > 1
+    projection_size: 512 # Dimension of the vector fed into the LSTM
+  # NEW: Configuration for the WeightedSum layer
+  weighted_sum:
+    alpha_initial_value: 0.5
+    alpha_is_trainable: false 
   # The input shape for a single CSI tensor.
   # Format: [Rx_Antennas, Tx_Antennas, Measurement_Index, Subcarriers]
   csi_shape: [4, 2, 4, 117]
@@ -34,6 +44,10 @@ training:
     enabled: true
     patience: 100 # Stop after N epochs with no improvement in validation loss
 
+  # NEW: Weight for the loss on the missing parts of the CSI.
+  # A value of 5.0 means the error on the missing antenna data is penalized 5x more.
+  missing_part_loss_weight: 5.0
+
 # -- Optimizer Settings --
 optimizer:
   name: "adam"
@@ -48,4 +62,4 @@ output:
   # Directory to save visualization results (e.g., image plots) during training
   training_vis_dir: "result"
   # Save a model checkpoint every N epochs
-  save_freq: 3
+  save_freq: 1

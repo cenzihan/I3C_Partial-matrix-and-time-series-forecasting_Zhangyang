@@ -1,24 +1,27 @@
 import torch
 
-def complex_mse(y_pred, y_true):
+def complex_mse(y_true, y_pred, mask, weight_factor):
     """
-    Computes the Mean Squared Error for complex-valued tensors.
-    
-    The loss is calculated as the mean of the squared differences
-    of both the real and imaginary parts.
-    
+    Computes the complex Mean Squared Error, with weighted loss for missing parts.
+
     Args:
-        y_pred (torch.Tensor): The predicted tensor. A complex tensor.
-        y_true (torch.Tensor): The ground truth tensor. A complex tensor.
-        
-    Returns:
-        torch.Tensor: A scalar tensor representing the loss.
+        y_true (torch.Tensor): The ground truth tensor.
+        y_pred (torch.Tensor): The predicted tensor.
+        mask (torch.Tensor): A tensor of the same shape as y_true, with 1s where
+                             data was missing and 0s where it was present.
+        weight_factor (float): The factor to multiply the loss on the missing parts.
     """
-    # For complex numbers, the squared absolute difference |y_true - y_pred|^2
-    # is equivalent to (y_true_real - y_pred_real)^2 + (y_true_imag - y_pred_imag)^2.
     error = y_true - y_pred
     
-    # Calculate the mean of the squared magnitude of the error.
-    loss = torch.mean(torch.abs(error)**2)
+    # Explicitly calculate the squared magnitude to ensure the result is a real tensor.
+    # |z|^2 = z.real^2 + z.imag^2
+    squared_magnitude = error.real**2 + error.imag**2
     
-    return loss
+    # Create a weight tensor: `weight_factor` for missing parts, 1.0 for present parts.
+    weights = 1.0 + (weight_factor - 1.0) * mask
+    
+    # Apply the weights
+    weighted_squared_error = weights * squared_magnitude
+    
+    # Return the mean of the weighted error
+    return torch.mean(weighted_squared_error)
