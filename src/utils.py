@@ -156,50 +156,37 @@ def visualize_and_save(inputs, y_true, y_pred, epoch, val_loss, config):
     phase_error = np.angle(np.exp(1j * (phase_true - phase_pred)))
 
     # --- Plotting ---
-    # We visualize for one antenna pair: Rx=0, Tx=0, Meas_idx=0
-    rx, tx, meas = 0, 0, 0
+    # We visualize 3 different antenna positions for comprehensive view
+    positions = [(0, 0, 0), (1, 1, 1), (2, 0, 2)]  # (device, tx, meas)
     
-    fig, axes = plt.subplots(2, 4, figsize=(24, 10))
+    fig, axes = plt.subplots(3, 2, figsize=(16, 15))
     fig.suptitle(f'CSI Reconstruction - Epoch {epoch} (Val Loss: {val_loss:.4f})\n'
-                 f'Showing Rx={rx}, Tx={tx}, Meas={meas}', fontsize=18)
+                 f'Multiple Antenna Positions Comparison', fontsize=16)
 
-    # --- Magnitude Plots ---
-    axes[0, 0].plot(mag_input[rx, tx, meas, :])
-    axes[0, 0].set_title('Input Magnitude')
-    axes[0, 0].grid(True)
+    for i, (device, tx, meas) in enumerate(positions):
+        # --- Magnitude Comparison (Overlapped) ---
+        axes[i, 0].plot(mag_input[device, tx, meas, :], 'b--', label='Input (Partial)', linewidth=2, alpha=0.7)
+        axes[i, 0].plot(mag_true[device, tx, meas, :], 'g-', label='Ground Truth', linewidth=2)
+        axes[i, 0].plot(mag_pred[device, tx, meas, :], 'r:', label='Predicted', linewidth=2)
+        axes[i, 0].set_title(f'Magnitude - Device={device}, Antenna=({tx},{meas})')
+        axes[i, 0].set_ylabel('Magnitude')
+        axes[i, 0].grid(True, alpha=0.3)
+        if i == 0:  # Only show legend on the first subplot
+            axes[i, 0].legend()
 
-    axes[0, 1].plot(mag_true[rx, tx, meas, :])
-    axes[0, 1].set_title('Ground Truth Magnitude')
-    axes[0, 1].grid(True)
+        # --- Phase Comparison (Overlapped) ---
+        axes[i, 1].plot(phase_input[device, tx, meas, :], 'b--', label='Input (Partial)', linewidth=2, alpha=0.7)
+        axes[i, 1].plot(phase_true[device, tx, meas, :], 'g-', label='Ground Truth', linewidth=2)
+        axes[i, 1].plot(phase_pred[device, tx, meas, :], 'r:', label='Predicted', linewidth=2)
+        axes[i, 1].set_title(f'Phase - Device={device}, Antenna=({tx},{meas})')
+        axes[i, 1].set_ylabel('Radians')
+        axes[i, 1].grid(True, alpha=0.3)
+        if i == 0:  # Only show legend on the first subplot
+            axes[i, 1].legend()
 
-    axes[0, 2].plot(mag_pred[rx, tx, meas, :])
-    axes[0, 2].set_title('Predicted Magnitude')
-    axes[0, 2].grid(True)
-    
-    axes[0, 3].plot(mag_error[rx, tx, meas, :], color='red')
-    axes[0, 3].set_title('Magnitude Error')
-    axes[0, 3].grid(True)
-
-    # --- Phase Plots ---
-    axes[1, 0].plot(phase_input[rx, tx, meas, :], '.-')
-    axes[1, 0].set_title('Input Phase')
-    axes[1, 0].set_ylabel('Radians')
-    axes[1, 0].grid(True)
-
-    axes[1, 1].plot(phase_true[rx, tx, meas, :], '.-')
-    axes[1, 1].set_title('Ground Truth Phase')
-    axes[1, 1].grid(True)
-
-    axes[1, 2].plot(phase_pred[rx, tx, meas, :], '.-')
-    axes[1, 2].set_title('Predicted Phase')
-    axes[1, 2].grid(True)
-
-    axes[1, 3].plot(phase_error[rx, tx, meas, :], '.-', color='red')
-    axes[1, 3].set_title('Phase Error')
-    axes[1, 3].grid(True)
-
-    for ax in axes.flat:
-        ax.set_xlabel('Subcarrier Index')
+    # Set x-axis labels for bottom row
+    for j in range(2):
+        axes[2, j].set_xlabel('Subcarrier Index (0-116)')
 
     save_path = os.path.join(save_dir, f"epoch_{epoch:04d}.png")
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
