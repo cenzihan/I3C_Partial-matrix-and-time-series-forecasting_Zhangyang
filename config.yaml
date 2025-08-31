@@ -1,0 +1,51 @@
+# ==============================================================================
+# Main Configuration File for CSI Inpainting and Prediction Model
+# ==============================================================================
+
+# -- Data Settings --
+data:
+  path: "datasets/csi_data.h5"  # Path to the preprocessed HDF5 file for PyTorch
+  total_records: 186879      # Total number of records in the dataset
+  # Which transmitter antenna (out of 2) to use as input for the inpainting branch.
+  # Indexing is based on the second dimension of the CSI tensor.
+  # Example: [0] uses the first transmitter antenna only.
+  input_tx_indices: [0]
+
+# -- Model Architecture --
+model:
+  name: "CsiInpaintingNet"
+  branch_type: "lstm" # Can be "cnn" or "lstm"
+  # The input shape for a single CSI tensor.
+  # Format: [Rx_Antennas, Tx_Antennas, Measurement_Index, Subcarriers]
+  csi_shape: [4, 2, 4, 117]
+
+# -- Training Settings --
+training:
+  epochs: 5000
+  batch_size: 128
+  # Percentage of data to use for validation.
+  validation_split: 0.15
+  # Number of samples to use for training. Use null to train on all available data.
+  # Example: 10000 will use the first 10000 samples for training/validation.
+  # num_samples_to_use: 100
+  dynamic_antenna_selection: false
+  sequence_length: 10 # Number of past time steps to use for LSTM input
+  early_stopping:
+    enabled: true
+    patience: 100 # Stop after N epochs with no improvement in validation loss
+
+# -- Optimizer Settings --
+optimizer:
+  name: "adam"
+  learning_rate: 0.001
+
+# -- Output & Logging --
+output:
+  # Directory to save trained model checkpoints
+  model_dir: "model"
+  # Directory for TensorBoard logs
+  log_dir: "logs"
+  # Directory to save visualization results (e.g., image plots) during training
+  training_vis_dir: "result"
+  # Save a model checkpoint every N epochs
+  save_freq: 3

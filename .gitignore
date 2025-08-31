@@ -1,0 +1,12 @@
+# 数据文件和输出目录
+datasets/
+model/
+result/
+logs/
+
+
+
+# 临时文件
+*.tmp
+*.temp
+*.log
